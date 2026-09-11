@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f5f5f2" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="PASS" />
+  <title>PASS — Trouver où vivre</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" />
+  <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="app">
+    <div id="map" aria-label="Carte de La Rochelle"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">P.</span>
+        <div class="brand-copy"><span class="brand-name">PASS</span><span class="brand-sub">Trouver où vivre</span></div>
+      </div>
+      <div class="score-pill" id="scorePill">
+        <span class="score-label">Zone</span>
+        <strong><span id="scoreValue">—</span><small>%</small></strong>
+        <span class="score-text" id="scoreText">Calcul…</span>
+      </div>
+      <div class="top-actions">
+        <button class="icon-btn" id="locateBtn" aria-label="Me situer">⌖</button>
+        <button class="icon-btn mobile-only" id="mobileFiltersBtn" aria-label="Filtres">≡</button>
+      </div>
+    </header>
+
+    <aside class="filter-panel" id="filterPanel">
+      <div class="panel-head">
+        <div><p class="eyebrow">RECHERCHE</p><h1>Mes critères</h1></div>
+        <button class="close-btn mobile-only" id="closeFiltersBtn" aria-label="Fermer">×</button>
+      </div>
+
+      <section class="filter-section">
+        <button class="section-toggle"><span><small>01</small><strong>Le logement</strong></span><b>⌄</b></button>
+        <div class="section-content">
+          <div class="range-block">
+            <div class="range-head"><span>Loyer maximum</span><strong><span id="maxRentValue">750</span> €</strong></div>
+            <input id="maxRent" type="range" min="400" max="850" step="10" value="750" />
+          </div>
+          <div class="range-block">
+            <div class="range-head"><span>Surface minimum</span><strong><span id="minAreaValue">15</span> m²</strong></div>
+            <input id="minArea" type="range" min="10" max="35" step="1" value="15" />
+          </div>
+
+          <div class="filter-group">
+            <span class="filter-label">Type</span>
+            <div class="chip-grid" id="typeFilters">
+              <button class="filter-chip active" data-value="Studio">Studio</button>
+              <button class="filter-chip active" data-value="T1">T1</button>
+              <button class="filter-chip active" data-value="T2">T2</button>
+            </div>
+          </div>
+
+          <div class="filter-group">
+            <span class="filter-label">Meublé</span>
+            <div class="chip-grid two" id="furnishedFilters">
+              <button class="filter-chip active" data-value="yes">Oui</button>
+              <button class="filter-chip active" data-value="no">Non</button>
+            </div>
+          </div>
+
+          <div class="filter-group">
+            <span class="filter-label">Équipements acceptés</span>
+            <div class="amenity-grid" id="amenityFilters">
+              <button class="amenity-chip active" data-value="parking">Parking</button>
+              <button class="amenity-chip active" data-value="balcony">Balcon</button>
+              <button class="amenity-chip active" data-value="laundry">Lave-linge</button>
+              <button class="amenity-chip active" data-value="wifi">Wifi</button>
+            </div>
+            <p class="microcopy">Tous sont acceptés par défaut. Retire ce qui ne te convient pas.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="filter-section">
+        <button class="section-toggle"><span><small>02</small><strong>Ma vie autour</strong></span><b>⌄</b></button>
+        <div class="section-content">
+          <p class="section-help">Chaque lieu actif participe au score et dessine une branche.</p>
+          <div id="lifeFilters" class="life-list"></div>
+          <button class="add-place-btn" id="addPlaceBtn">+ Ajouter un lieu personnel</button>
+        </div>
+      </section>
+
+      <section class="filter-section compact">
+        <button class="section-toggle"><span><small>03</small><strong>Mes logements</strong></span><b>⌄</b></button>
+        <div class="section-content">
+          <div class="status-summary">
+            <button><span>♥</span><strong id="interestedCount">0</strong><small>Intéressés</small></button>
+            <button><span>✓</span><strong id="appliedCount">0</strong><small>Candidatures</small></button>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <div class="crosshair" id="crosshair" aria-hidden="true">
+      <span class="crosshair-line horizontal"></span>
+      <span class="crosshair-line vertical"></span>
+      <span class="crosshair-ring"></span>
+      <span class="crosshair-dot"></span>
+    </div>
+
+    <div class="explore-hint">Déplace La Rochelle sous le repère</div>
+    <div class="results-indicator"><span class="dot"></span><strong id="visibleHomeCount">0</strong><span>logements visibles</span></div>
+
+    <section class="capture-card" id="captureCard" hidden>
+      <div class="capture-kicker"><span class="capture-dot"></span><span id="captureDistance">À proximité</span></div>
+      <div class="capture-head">
+        <div><h2 id="captureTitle"></h2><p id="captureArea"></p></div>
+        <div class="home-match"><strong><span id="captureMatch">—</span><small>%</small></strong><span>compatibilité</span></div>
+      </div>
+      <div class="capture-main">
+        <div class="rent"><strong id="captureRent"></strong><span>/ mois</span></div>
+        <div class="facts"><span><b id="captureSqm"></b> m²</span><span id="captureType"></span><span id="captureFurnished"></span></div>
+      </div>
+      <div class="amenities" id="captureAmenities"></div>
+      <div class="capture-actions">
+        <button class="action-btn ignore" id="ignoreBtn">Ignorer</button>
+        <button class="action-btn interested" id="interestedBtn">Intéressé</button>
+        <button class="action-btn apply" id="applyBtn">Je candidate</button>
+      </div>
+      <p class="capture-note" id="captureNote"></p>
+    </section>
+
+    <div class="toast" id="toast" hidden></div>
+    <div class="filter-backdrop" id="filterBackdrop" hidden></div>
+
+    <div class="place-mode-banner" id="placeModeBanner" hidden>
+      <div><strong>Ajoute ton lieu</strong><span>Clique sur la carte pour le positionner.</span></div>
+      <button id="cancelPlaceMode">Annuler</button>
+    </div>
+
+    <div class="modal-backdrop" id="placeModal" hidden>
+      <form class="place-modal" id="placeForm">
+        <p class="eyebrow">NOUVEAU LIEU</p><h2>Qu’est-ce qui compte ici ?</h2>
+        <label>Nom<input id="placeNameInput" type="text" maxlength="40" placeholder="Travail, cinéma, sport…" required /></label>
+        <label>Importance
+          <div class="importance-grid" id="importanceGrid">
+            <button type="button" data-weight="1">Secondaire</button>
+            <button type="button" data-weight="2" class="active">Important</button>
+            <button type="button" data-weight="3">Indispensable</button>
+          </div>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" id="cancelPlaceModal">Annuler</button>
+          <button type="submit" class="dark-btn">Ajouter</button>
+        </div>
+      </form>
+    </div>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>
