@@ -1,53 +1,45 @@
-# PASS — PWA complète
+# PASS — PWA corrigée
 
-Cette archive contient la version fonctionnelle demandée de PASS.
+Cette version corrige les deux problèmes visibles dans le test précédent.
 
-## Fichiers
+## Carte à nouveau libre
 
-- `index.html`
-- `styles.css`
-- `app.js`
-- `manifest.webmanifest`
-- `sw.js`
-- `icon-192.png`
-- `icon-512.png`
+Le bug venait du verrouillage d'un appartement : le code recentrait la carte à chaque événement `move`, ce qui empêchait tout déplacement.
 
-## Fonctionnalités intégrées
+Désormais :
+- la carte se déplace normalement à la souris et au doigt ;
+- un clic sur un appartement le fait glisser au centre sans modifier le niveau de zoom ;
+- l'appartement est ensuite verrouillé au centre uniquement pour les opérations de zoom ;
+- un nouveau déplacement volontaire de la carte libère immédiatement ce verrouillage.
 
-- Carte principale plein écran de La Rochelle.
-- Filtres logement : loyer, surface, type, meublé, équipements.
-- Repères personnels fixes : importance + mode À pied / Vélo / Voiture.
-- Appartements dessinés directement dans une couche géographique MapLibre : ils restent parfaitement ancrés au plan.
-- Clic sur un appartement : recentrage SANS changement de zoom.
-- Une fois sélectionné, l'appartement reste verrouillé exactement sous le viseur central pendant les zooms.
-- Dès que l'utilisateur recommence à déplacer volontairement la carte, le verrouillage est libéré.
-- Capture de proximité avec flash bref + clic d'obturateur synthétique + vibration compatible.
-- Trois états : Ignorer / Intéressé / Je candidate.
-- `Je candidate` simule la notification automatique du propriétaire.
-- Branches droites très légères pendant le déplacement.
-- À l'arrêt, tentative de calcul des vrais trajets via Valhalla (OpenStreetMap), pour À pied / Vélo / Voiture.
-- Clic sur un trajet réel : distance + durée.
-- PWA installable et responsive.
+## Trajets recalculés
 
-## Routage
+Pendant le déplacement :
+- les lignes temporaires restent toujours reliées exactement au point central ;
+- les anciens itinéraires routés sont retirés lorsqu'ils deviennent obsolètes.
 
-Le prototype utilise le serveur de démonstration public Valhalla :
-`https://valhalla1.openstreetmap.de/route`
+Après une courte pause — et systématiquement à la fin d'un déplacement :
+- PASS recalcule les itinéraires depuis la nouvelle position centrale ;
+- le mode propre à chaque lieu est respecté : À pied / Vélo / Voiture ;
+- les trajets utilisent le réseau OpenStreetMap via Valhalla ;
+- la géométrie est contrôlée avant affichage ;
+- chaque itinéraire est forcé à toucher exactement le centre et son point d'intérêt ;
+- une petite étiquette indique le lieu et la durée ;
+- un clic sur l'itinéraire ouvre la distance et la durée.
 
-Le serveur est soumis à une politique de fair use. Pour une application en production, il faudra utiliser une instance Valhalla propre ou un fournisseur de routage dédié.
+Le prototype utilise :
+`https://valhalla.openstreetmap.de/route`
 
-Si le serveur de routage ne répond pas, l'application conserve les lignes droites et le reste de l'interface continue de fonctionner.
+En production, il faudra utiliser une instance Valhalla dédiée ou un service de routage avec garanties de disponibilité.
 
-## Lancer localement
+## Capture d'un logement
 
-Dans ce dossier :
+- approche du point central : capture automatique + flash/clic ;
+- clic direct sur un logement : glissement au centre sans zoom automatique ;
+- Ignorer / Intéressé / Je candidate restent disponibles.
 
-```bash
-python3 -m http.server 8080
-```
+## Important pour GitHub Pages
 
-Puis ouvrir :
+Le service worker est maintenant en stratégie `network first` et son cache a changé de version. Cela évite que Safari ou Chrome continue d'utiliser un ancien `app.js` après le remplacement des fichiers.
 
-`http://localhost:8080`
-
-Pour l'installation PWA sur téléphone, utiliser un hébergement HTTPS (GitHub Pages convient pour le prototype).
+Après avoir remplacé les fichiers sur GitHub, recharge une fois la page.

@@ -2,7 +2,7 @@
 "use strict";
 
 const LR={lng:-1.1511,lat:46.1603};
-const ROUTER="https://valhalla1.openstreetmap.de/route";
+const ROUTER="https://valhalla.openstreetmap.de/route";
 const map=new maplibregl.Map({
   container:"map",
   style:"https://tiles.openfreemap.org/styles/positron",
@@ -69,6 +69,10 @@ const el={
 };
 const poiMarkers=new Map();
 let audioCtx=null;
+let routeTimer=null;
+let routeAbortController=null;
+let lastRouteRequestedAt=0;
+let pendingLockHomeId=null;
 
 function esc(v){return String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
 function distanceKm(a,b){
@@ -106,8 +110,8 @@ function nearestHome(center){
   return filteredHomes().map(h=>({...h,distance:distanceKm(center,h),match:pointCompatibility(h)})).sort((a,b)=>a.distance-b.distance)[0]||null;
 }
 function currentHome(){return state.homes.find(h=>h.id===state.lockedHomeId)||null}
-function lineWidth(w){return ({1:1.1,2:2.1,3:3.5})[w]||2}
-function lineOpacity(w){return ({1:.24,2:.48,3:.78})[w]||.5}
+function lineWidth(w){return ({1:1.05,2:1.55,3:2.15})[w]||1.5}
+function lineOpacity(w){return ({1:.30,2:.52,3:.74})[w]||.5}
 function straightRoutes(center){
   return {type:"FeatureCollection",features:state.life.filter(p=>p.active).map(p=>({
     type:"Feature",
@@ -200,14 +204,32 @@ function renderHome(h,locked){
 }
 function selectHomeById(id){
   const h=state.homes.find(x=>x.id===id);if(!h)return;
-  state.lockedHomeId=id;state.lastCapturedId=id;
-  const z=map.getZoom();
-  map.easeTo({center:[h.lng,h.lat],zoom:z,duration:520});
+  pendingLockHomeId=id;
+  state.lastCapturedId=id;
+  const currentZoom=map.getZoom();
+
+  // Preserve the exact zoom level: only the centre glides to the apartment.
+  map.easeTo({center:[h.lng,h.lat],zoom:currentZoom,duration:460,essential:true});
   captureEffect();
-  setTimeout(()=>{map.setCenter([h.lng,h.lat]);updateScene(true)},540);
+
+  const finishLock=()=>{
+    if(pendingLockHomeId!==id)return;
+    state.lockedHomeId=id;
+    pendingLockHomeId=null;
+    map.setCenter([h.lng,h.lat]);
+    el.target.classList.add("locked");
+    el.lockState.textContent="Appartement verrouillé";
+    updateScene(true);
+  };
+  setTimeout(finishLock,480);
 }
 function unlockHome(){
-  if(state.lockedHomeId){state.lockedHomeId=null;el.target.classList.remove("locked");el.lockState.textContent="Exploration libre"}
+  pendingLockHomeId=null;
+  if(state.lockedHomeId){
+    state.lockedHomeId=null;
+    el.target.classList.remove("locked");
+    el.lockState.textContent="Exploration libre";
+  }
 }
 function updateCounters(){
   let i=0,a=0;state.status.forEach(v=>{if(v==="interested")i++;if(v==="applied")a++});el.interestedCount.textContent=i;el.appliedCount.textContent=a;
@@ -235,36 +257,194 @@ function locate(){
 }
 el.locateBtn.addEventListener("click",locate);
 
-async function fetchRealRoutes(center){
-  const token=++state.routeRequestToken;
-  const active=state.life.filter(p=>p.active).sort((a,b)=>b.weight-a.weight).slice(0,6);
-  const feats=[];
-  await Promise.all(active.map(async p=>{
-    try{
-      const body={locations:[{lat:center.lat,lon:center.lng},{lat:p.lat,lon:p.lng}],costing:p.mode,units:"kilometers",shape_format:"polyline6"};
-      const r=await fetch(ROUTER,{method:"POST",headers:{"Content-Type":"application/json","X-Client-Id":"pass-prototype"},body:JSON.stringify(body)});
-      if(!r.ok)throw new Error("route");
-      const data=await r.json();if(token!==state.routeRequestToken)return;
-      const leg=data.trip?.legs?.[0],sum=data.trip?.summary;if(!leg||!sum)return;
-      feats.push({type:"Feature",properties:{id:p.id,name:p.name,mode:p.mode,minutes:Math.max(1,Math.round(sum.time/60)),distance:+sum.length.toFixed(1),width:lineWidth(p.weight),opacity:lineOpacity(p.weight)},geometry:{type:"LineString",coordinates:decodePolyline6(leg.shape)}});
-    }catch(_){}
-  }));
-  if(token!==state.routeRequestToken)return;
-  const src=map.getSource("real-routes");
-  if(src)src.setData({type:"FeatureCollection",features:feats});
+function clearRealRoutes(){
+  const routes=map.getSource("real-routes");
+  if(routes)routes.setData({type:"FeatureCollection",features:[]});
+  const labels=map.getSource("route-labels");
+  if(labels)labels.setData({type:"FeatureCollection",features:[]});
+  el.routeInfo.hidden=true;
 }
-function decodePolyline6(str){
-  let idx=0,lat=0,lng=0,coords=[];
-  while(idx<str.length){
-    let b,shift=0,result=0;
-    do{b=str.charCodeAt(idx++)-63;result|=(b&0x1f)<<shift;shift+=5}while(b>=0x20);
-    const dlat=(result&1)?~(result>>1):(result>>1);lat+=dlat;
-    shift=0;result=0;
-    do{b=str.charCodeAt(idx++)-63;result|=(b&0x1f)<<shift;shift+=5}while(b>=0x20);
-    const dlng=(result&1)?~(result>>1):(result>>1);lng+=dlng;
-    coords.push([lng/1e6,lat/1e6]);
+
+function scheduleRouteRefresh(force=false){
+  if(!state.mapReady)return;
+  clearTimeout(routeTimer);
+
+  const now=Date.now();
+  const run=()=>{
+    lastRouteRequestedAt=Date.now();
+    const c=map.getCenter();
+    fetchRealRoutes({lng:c.lng,lat:c.lat});
+  };
+
+  // During a long drag we still refresh roughly once per second.
+  if(force || now-lastRouteRequestedAt>900){
+    run();
+  }else{
+    routeTimer=setTimeout(run,260);
   }
-  return coords;
+}
+
+function extractRouteCoordinates(shape){
+  if(!shape)return null;
+
+  // GeoJSON returned by recent Valhalla instances.
+  if(shape.type==="LineString" && Array.isArray(shape.coordinates)){
+    return shape.coordinates;
+  }
+  if(shape.geometry?.type==="LineString" && Array.isArray(shape.geometry.coordinates)){
+    return shape.geometry.coordinates;
+  }
+
+  // Some implementations may return a raw array.
+  if(Array.isArray(shape)){
+    if(Array.isArray(shape[0]))return shape;
+    if(shape[0] && typeof shape[0]==="object"){
+      return shape.map(p=>[Number(p.lon ?? p.lng),Number(p.lat)]);
+    }
+  }
+
+  // Polyline6 fallback.
+  if(typeof shape==="string")return decodePolyline6(shape);
+  return null;
+}
+
+function routeLooksPlausible(coords,center,p){
+  if(!Array.isArray(coords)||coords.length<2)return false;
+  const minLng=Math.min(center.lng,p.lng)-.08,maxLng=Math.max(center.lng,p.lng)+.08;
+  const minLat=Math.min(center.lat,p.lat)-.08,maxLat=Math.max(center.lat,p.lat)+.08;
+  return coords.every(c=>
+    Array.isArray(c) &&
+    Number.isFinite(Number(c[0])) &&
+    Number.isFinite(Number(c[1])) &&
+    Number(c[0])>=minLng && Number(c[0])<=maxLng &&
+    Number(c[1])>=minLat && Number(c[1])<=maxLat
+  );
+}
+
+async function requestRoute(center,p,signal){
+  const formats=["geojson","polyline6"];
+
+  for(const format of formats){
+    try{
+      const body={
+        locations:[{lat:center.lat,lon:center.lng},{lat:p.lat,lon:p.lng}],
+        costing:p.mode,
+        units:"kilometers",
+        shape_format:format,
+        directions_options:{units:"kilometers"}
+      };
+
+      // GET avoids a CORS preflight on a static GitHub Pages deployment.
+      const url=`${ROUTER}?json=${encodeURIComponent(JSON.stringify(body))}`;
+      const r=await fetch(url,{signal,cache:"no-store"});
+      if(!r.ok)continue;
+
+      const data=await r.json();
+      const leg=data.trip?.legs?.[0];
+      const sum=data.trip?.summary;
+      if(!leg||!sum)continue;
+
+      let coords=extractRouteCoordinates(leg.shape);
+      if(!routeLooksPlausible(coords,center,p))continue;
+
+      // Force the rendered route to touch the exact screen centre and the exact POI.
+      coords=[
+        [center.lng,center.lat],
+        ...coords,
+        [p.lng,p.lat]
+      ];
+
+      return {
+        type:"Feature",
+        properties:{
+          id:p.id,
+          name:p.name,
+          mode:p.mode,
+          minutes:Math.max(1,Math.round(Number(sum.time)/60)),
+          distance:Number(Number(sum.length).toFixed(1)),
+          width:lineWidth(p.weight),
+          opacity:lineOpacity(p.weight)
+        },
+        geometry:{type:"LineString",coordinates:coords}
+      };
+    }catch(err){
+      if(err?.name==="AbortError")throw err;
+    }
+  }
+  return null;
+}
+
+async function fetchRealRoutes(center){
+  if(!state.mapReady)return;
+
+  if(routeAbortController)routeAbortController.abort();
+  routeAbortController=new AbortController();
+  const signal=routeAbortController.signal;
+  const token=++state.routeRequestToken;
+
+  const active=state.life
+    .filter(p=>p.active)
+    .sort((a,b)=>b.weight-a.weight)
+    .slice(0,8);
+
+  const results=await Promise.allSettled(
+    active.map(p=>requestRoute(center,p,signal))
+  );
+
+  if(signal.aborted || token!==state.routeRequestToken)return;
+
+  const feats=results
+    .filter(r=>r.status==="fulfilled" && r.value)
+    .map(r=>r.value);
+
+  const routeSource=map.getSource("real-routes");
+  if(routeSource)routeSource.setData({type:"FeatureCollection",features:feats});
+
+  const labelFeatures=feats.map(f=>{
+    const coords=f.geometry.coordinates;
+    const mid=coords[Math.floor(coords.length/2)];
+    return {
+      type:"Feature",
+      properties:{
+        label:`${f.properties.name} · ${f.properties.minutes} min`
+      },
+      geometry:{type:"Point",coordinates:mid}
+    };
+  });
+
+  const labelSource=map.getSource("route-labels");
+  if(labelSource)labelSource.setData({type:"FeatureCollection",features:labelFeatures});
+}
+
+function decodePolyline6(str){
+  let index=0,lat=0,lng=0,coordinates=[];
+  const factor=1e6;
+
+  while(index<str.length){
+    let byte=null,shift=0,result=0;
+
+    do{
+      byte=str.charCodeAt(index++)-63;
+      result|=(byte&0x1f)<<shift;
+      shift+=5;
+    }while(byte>=0x20);
+
+    lat+=(result&1)?~(result>>1):(result>>1);
+
+    shift=0;
+    result=0;
+
+    do{
+      byte=str.charCodeAt(index++)-63;
+      result|=(byte&0x1f)<<shift;
+      shift+=5;
+    }while(byte>=0x20);
+
+    lng+=(result&1)?~(result>>1):(result>>1);
+    coordinates.push([lng/factor,lat/factor]);
+  }
+
+  return coordinates;
 }
 function showRouteInfo(feature){
   const p=feature.properties;el.routeInfoMode.textContent=modeLabel(p.mode);el.routeInfoTitle.textContent=p.name;el.routeInfoTime.textContent=`${p.minutes} min`;el.routeInfoDistance.textContent=`${Number(p.distance).toFixed(1).replace(".",",")} km`;el.routeInfo.hidden=false;
@@ -290,9 +470,51 @@ el.placeForm.addEventListener("submit",e=>{
 map.on("load",()=>{
   state.mapReady=true;
   map.addSource("ghost-routes",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
-  map.addLayer({id:"ghost-routes",type:"line",source:"ghost-routes",layout:{"line-cap":"round","line-join":"round"},paint:{"line-color":"#111317","line-width":["get","width"],"line-opacity":["*",["get","opacity"],.34],"line-dasharray":[2,2]}});
+  map.addLayer({id:"ghost-routes",type:"line",source:"ghost-routes",layout:{"line-cap":"round","line-join":"round"},paint:{"line-color":"#111317","line-width":["get","width"],"line-opacity":["*",["get","opacity"],.16],"line-dasharray":[2,2]}});
   map.addSource("real-routes",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
-  map.addLayer({id:"real-routes",type:"line",source:"real-routes",layout:{"line-cap":"round","line-join":"round"},paint:{"line-color":"#111317","line-width":["get","width"],"line-opacity":["get","opacity"]}});
+  map.addLayer({
+    id:"real-routes",
+    type:"line",
+    source:"real-routes",
+    layout:{"line-cap":"round","line-join":"round"},
+    paint:{
+      "line-color":"#30343a",
+      "line-width":["get","width"],
+      "line-opacity":["get","opacity"]
+    }
+  });
+
+  // Invisible interaction layer: the route stays visually thin but is easy to click/tap.
+  map.addLayer({
+    id:"real-routes-hit",
+    type:"line",
+    source:"real-routes",
+    layout:{"line-cap":"round","line-join":"round"},
+    paint:{
+      "line-color":"#000000",
+      "line-width":14,
+      "line-opacity":0.01
+    }
+  });
+
+  map.addSource("route-labels",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  map.addLayer({
+    id:"route-labels",
+    type:"symbol",
+    source:"route-labels",
+    layout:{
+      "text-field":["get","label"],
+      "text-size":10,
+      "text-anchor":"center",
+      "text-allow-overlap":false
+    },
+    paint:{
+      "text-color":"#30343a",
+      "text-halo-color":"rgba(255,255,255,.94)",
+      "text-halo-width":3
+    }
+  });
+
   map.addSource("homes",{type:"geojson",data:homeGeoJSON()});
   map.addLayer({id:"homes",type:"circle",source:"homes",paint:{
     "circle-radius":["case",["==",["get","id"],["literal",-1]],8,6],
@@ -305,24 +527,57 @@ map.on("load",()=>{
 
   syncPoiMarkers();renderLife();updateScene(true);
 });
+map.on("dragstart",()=>{
+  // A deliberate pan immediately releases an apartment.
+  unlockHome();
+  clearRealRoutes();
+});
+
 map.on("move",()=>{
-  if(state.lockedHomeId){
-    const h=currentHome();if(h)map.setCenter([h.lng,h.lat]);
-  }
+  // Never force the centre here: doing so was the bug that froze the map.
   schedule();
+
+  if(!state.lockedHomeId && !pendingLockHomeId){
+    scheduleRouteRefresh(false);
+  }
 });
+
+map.on("zoomstart",()=>{
+  if(state.lockedHomeId){
+    const h=currentHome();
+    if(h)map.setCenter([h.lng,h.lat]);
+  }
+});
+
 map.on("zoom",()=>{
+  // While zooming a locked apartment, preserve the apartment exactly at screen centre.
   if(state.lockedHomeId){
-    const h=currentHome();if(h)map.setCenter([h.lng,h.lat]);
+    const h=currentHome();
+    if(h)map.setCenter([h.lng,h.lat]);
   }
   schedule();
 });
-map.on("moveend",()=>updateScene(true));
-map.on("dragstart",()=>unlockHome());
-map.on("click","homes",e=>{const f=e.features?.[0];if(f)selectHomeById(Number(f.properties.id))});
+
+map.on("zoomend",()=>{
+  if(state.lockedHomeId){
+    const h=currentHome();
+    if(h)map.setCenter([h.lng,h.lat]);
+  }
+  updateScene(true);
+});
+
+map.on("moveend",()=>{
+  updateScene(false);
+  scheduleRouteRefresh(true);
+});
+
+map.on("click","homes",e=>{
+  const f=e.features?.[0];
+  if(f)selectHomeById(Number(f.properties.id));
+});
 map.on("mouseenter","homes",()=>map.getCanvas().style.cursor="pointer");map.on("mouseleave","homes",()=>map.getCanvas().style.cursor="");
-map.on("click","real-routes",e=>{if(e.features?.[0])showRouteInfo(e.features[0])});
-map.on("mouseenter","real-routes",()=>map.getCanvas().style.cursor="pointer");map.on("mouseleave","real-routes",()=>map.getCanvas().style.cursor="");
+map.on("click","real-routes-hit",e=>{if(e.features?.[0])showRouteInfo(e.features[0])});
+map.on("mouseenter","real-routes-hit",()=>map.getCanvas().style.cursor="pointer");map.on("mouseleave","real-routes-hit",()=>map.getCanvas().style.cursor="");
 map.on("click",e=>{
   if(state.addMode&&!e.defaultPrevented){
     state.pendingPlace=e.lngLat;el.placeName.value="";el.placeModal.hidden=false;setTimeout(()=>el.placeName.focus(),20);
